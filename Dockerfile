@@ -1,33 +1,9 @@
-# Generic image for running the MCP server over streamable-http (remote deploy).
-# Secrets (Yandex cookies, OAuth config) are injected at runtime via env vars —
-# never baked into the image. See README "Remote deploy".
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-
-WORKDIR /app
-
-# Install deps first for better layer caching.
-#
-# From the lock, not from the version ranges. `uv pip install .` resolves
-# afresh every build and ignores uv.lock entirely, so a build months after the
-# last one silently picks up a new major of a dependency — mcp 2.x here, which
-# starts and exits. The lock exists to say which versions this was tested with;
-# this is what makes the image obey it.
-COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
-RUN uv export --frozen --no-dev --extra server --format requirements-txt -o /tmp/requirements.txt \
- && uv pip install --system --no-cache -r /tmp/requirements.txt \
- && uv pip install --system --no-cache --no-deps . \
- && rm -f /tmp/requirements.txt
-
-# Run as a non-root user.
-RUN useradd --create-home --uid 10001 app
-USER app
-
-# Defaults to stdio, so a bare `docker run -i` (and MCP introspection tools) get
-# a working server. For a remote deploy, set
-# YANDEX_LAVKA_MCP_TRANSPORT=streamable-http (+ OAuth env) — see README.
-ENV YANDEX_LAVKA_MCP_HOST=0.0.0.0 \
-    YANDEX_LAVKA_MCP_PORT=8000
-
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium chromium-sandbox python3 && rm -rf /var/lib/apt/lists/* && useradd --create-home --uid 10001 browser-test
+USER browser-test
+WORKDIR /tmp
+ENV PORT=8000
+ENV XDG_CONFIG_HOME=/tmp/.chromium
+ENV XDG_CACHE_HOME=/tmp/.chromium
 EXPOSE 8000
-CMD ["yandex-lavka-mcp"]
+CMD ["python3", "-u", "-c", "import http.server, os, subprocess, tempfile, threading\n\ndef check():\n    try:\n        with tempfile.TemporaryDirectory(prefix='chromium-') as profile:\n            result = subprocess.run(['chromium', '--headless', '--disable-dev-shm-usage', '--user-data-dir=' + profile, '--dump-dom', 'https://example.com/'], capture_output=True, text=True, timeout=150)\n        passed = result.returncode == 0 and '<title>Example Domain</title>' in result.stdout\n        print('CHROMIUM_TEST:', 'PASS' if passed else 'FAIL', flush=True)\n        if not passed:\n            print(result.stderr[-2000:], flush=True)\n    except Exception as error:\n        print('CHROMIUM_TEST: FAIL:', error, flush=True)\n\nclass Health(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200 if self.path in ('/', '/health', '/healthz') else 404)\n        self.end_headers()\n        self.wfile.write(b'Hostless Chromium test\\n')\n\nthreading.Thread(target=check, daemon=True).start()\nhttp.server.ThreadingHTTPServer(('0.0.0.0', int(os.environ['PORT'])), Health).serve_forever()"]
